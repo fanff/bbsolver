@@ -92,7 +92,7 @@ class Assortment(dict):
 def quad_node_types(
     input: ColorEnum, allowed_tops: Set[Tuple[ColorEnum, ColorEnum]] = None
 ) -> Set[NodeColor]:
-    """Build all possible NodeColor possible configurations for a given input color."""
+    """Build all possible NodeColor configurations for a given input color."""
     enum_cls = type(input)
     values = list(enum_cls)
     results = set()
@@ -170,7 +170,7 @@ class Bcol:
             color = c.to_color()
 
             if w_idx % 2 == 0:
-                txt += f"[{color}]\\\[/{color}] "
+                txt += f"[{color}]\\\\[/{color}] "
             else:
                 txt += f"[{color}]/[/{color}] "
         txt += "\n"
@@ -183,7 +183,7 @@ class Bcol:
             if w_idx % 2 == 0:
                 txt += f"[{color}]/[/{color}] "
             else:
-                txt += f"[{color}]\\\[/{color}] "
+                txt += f"[{color}]\\\\[/{color}] "
         return Text.from_markup(f"{txt}")
 
 
@@ -429,10 +429,15 @@ def make_assortment_from_col_configs(col_configs: List[str]) -> Assortment:
 
 
 # structure to hold the allowed_tops validator
-# its contains a list of N "Counter" associated with a segment of a column
-# each counter indicate how many time each color must appear in this segment, this is a minimal requirement to be able to build a column with this allowed_tops
-# it is created using the col config of some columns, we calculate and the counters, and then create the AllowedTopsValidator,
-# it provides a method to validate if a given allowed_top tuple is compatible with this allowed tops validator
+# its contains a list of N "Counters" associated with a segment of a column (between start and end)
+# each counter indicate how many time each color must appear at least in this segment,
+# this is a minimal requirement to be able to build a column with this allowed_tops
+#
+# It provides a method to validate if a given allowed_top tuple is compatible with this allowed tops validator
+#
+# It is created using the col_configs of a couple of columns (the one we define the validator for, followed
+# by the next M layers, M depends on the width of the braclet, the more width, the more depth),
+# we calculate and the counters, and then create the AllowedTopsValidator, see function make_top_validator
 class AllowedTopsValidator:
     segment_counters: List[Tuple[Counter[ColorEnum, int], int, int]] = []
 
@@ -452,7 +457,38 @@ class AllowedTopsValidator:
         return True
 
 
-def make_top_validator(col_configs: List[str]) -> AllowedTopsValidator:
+def make_minimum_top_count_validator(
+    col_configs: List[str], wire_count=None
+) -> AllowedTopsValidator:
+    if len(col_configs) < 2:
+        if wire_count is None:
+            raise ValueError(
+                "At least two column configs are needed to build a validator."
+            )
+        else:
+            col = col_configs[0]
+            if len(col) * 2 == wire_count:  # normal column
+                sc = []
+                for cidx, c in enumerate(col):
+                    sc.append(
+                        (Counter({ColorEnum.from_str(c): 1}), cidx * 2, cidx * 2 + 2)
+                    )
+                return AllowedTopsValidator(sc)
+            elif len(col) * 2 + 2 == wire_count:  # small column
+                sc = []
+                for cidx, c in enumerate(col):
+                    sc.append(
+                        (
+                            Counter({ColorEnum.from_str(c): 1}),
+                            cidx * 2 + 1,
+                            cidx * 2 + 3,
+                        )
+                    )
+                return AllowedTopsValidator(sc)
+            else:
+                raise ValueError(
+                    f"Wrong wire count. {wire_count} not matching column length {len(col)}."
+                )
 
     small_col_size = min(len(col_configs[0]), len(col_configs[1]))
     # we determine this because it does change the segment indexing.
@@ -538,14 +574,6 @@ if __name__ == "__main__":
     columns = ["CCBABBACCB", "CCABAACCB", "CCAABAACCB", "CCABAACCB"]  # 10 nodes
 
     columns = [
-        "CCBABBACCBAA",
-        "CCABAACCBAA",
-        "CCAABAACCBAA",
-        "CCABAACCBAA",
-        "CCABAACCBAAA",
-    ]  # 12
-
-    columns = [
         "ACCBABBACCBAA",
         "ACCABAACCBAA",
         "ACCAABAACCBAA",
@@ -573,21 +601,34 @@ if __name__ == "__main__":
         "ABCABAACAAAACCBAACC",
         "ABCABAACAAAACCBAAACC",
     ]  # 20
+    # columns = [
+    #    "BBBCACBBB",
+    #    "AABCACAA",
+    #    "AABCACBAA",
+    #    "ABACACBA",
+    #    "ABACACABA",
+    #    "BAACACAB",
+    #    "BAACACAAB",
+    #    "BAACACAB",
+    #    "ABACACABA",
+    #    "ABACACBA",
+    #    "AABCACBAA",
+    #    "AABCACAA",
+    #    "BBBCACBBB",
+    # ]  #
+
     columns = [
-        "BBBCACBBB",
-        "AABCACAA",
-        "AABCACBAA",
-        "ABACACBA",
-        "ABACACABA",
-        "BAACACAB",
-        "BAACACAAB",
-        "BAACACAB",
-        "ABACACABA",
-        "ABACACBA",
-        "AABCACBAA",
-        "AABCACAA",
-        "BBBCACBBB",
-    ]  #
+        "CCBABBACCBAA",
+        "CCABAACCBAA",
+        "CCAABAACCBAA",
+        "CCABAACCBAA",
+        "CCABAACCBAAA",
+    ]  # 12
+    columns = [
+        "CCBABACCBACCB",
+        "CCABAACCACCB",
+        
+    ]*30
     # 0. determine assortment from column configurations, this ensure the
     # assortment is compatible with all columns and there is the minimum number of wires
     init_wireing = tuple(
@@ -603,14 +644,13 @@ if __name__ == "__main__":
     console = Console()
 
     console.print("Assortment:", assortment)
-
     # I am now building a Top Validator from the column configurations
 
     top_validators: List[AllowedTopsValidator] = []
     for col_idx in range(len(columns) - 1):
         v = []
         for depth in range(2, wire_count - 1, 2):
-            v += make_top_validator(
+            v += make_minimum_top_count_validator(
                 columns[col_idx : col_idx + depth + 1]
             ).segment_counters
 

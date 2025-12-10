@@ -1,0 +1,53 @@
+I have a Csp problme to solve in python. 
+
+the Problem is very high in number of constraints and dimension; I am trying to figure out backtracking search exploration subject to constraints to solve it. 
+
+the constraints are numerous, I can build a set of constraints out the problem that help give a "minimum bound" and a "maximum bound" during the search I believe. 
+
+The problem sovling try to assing values (lets say 3 possible values a,b,c) for every cell in a list of C elements; 
+there is 3^C  absolute possibility. 
+
+
+The constraints are exressed with "counts within a range" , independently for example : 
+
+(0,2) 100    means:  "in the range [0,2[ ,   there  must be at least one a," => this means in my list at index 0 &1  I can have   
+    * (a,b)
+    * (a,c) 
+    * (a,a) 
+    * (b , a) 
+    * (c, a) 
+
+
+(4,8) 120 means: "in the range [4,8[ there must be at least 2 b  and one a => this means in my list at index 4,6  I can have 
+  * (b, b, a, a)
+  * (b, b , a, b) 
+  * (b, b , a , c)
+  * (b, b ,b , a) 
+  * (b, b, c, a)
+  * (b, a, a, b)
+  * (b, a, b, a) 
+  * (b, a, b, b)
+  * (b, a, b, c)
+  * etce tc... always 2 b and one a , all solutions are clearly impossbile 
+
+
+
+What we identified on the constraint are somethimes overlapping and we identified two cases: 
+
+* if two constraints have a perfect same range then we can  max the components of the counts, to represents a "higher" lower bound for the range
+ like, if (0,3) 200 and (0,3) 010 , then I can conclude that 0,3 210 holds. 
+
+* if two constraints range have are contiguous , then I can sum its components, like : 
+(0,3) 200 => at least 2 a 
+(3,5) 101 => at least 1 a and 1 c 
+
+this can be said 
+(0,5) 301 => at least 3 a and 1 c. 
+
+
+As you can see the constraints set for something like a "latice" of partial count. 
+we want to properly handle those constraints for solving and maximzing information gain, 
+
+First reformulate the problem to clear english and proper vocabulary. 
+
+then suggest an approach for helping on the resolution. 
