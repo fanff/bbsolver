@@ -10,12 +10,11 @@ from rich.console import Console
 
 from buildXng_validators import (
     build_col_iterator,
-    build_min_max_validator,
     build_min_max_validator_2,
     counter_to_rich,
     counter_to_vec,
 )
-from color import ColorCounterBase, ColorTupleBase, int_to_color_str, make_color_types
+from color import int_to_color_str
 
 
 T = TypeVar("T")
@@ -91,12 +90,12 @@ def quad_node_types(
 class Bcol:
     """Represents a column of nodes with top (T), bottom (B) colors for a Column."""
 
-    T: AnyColumnColors
-    B: AnyColumnColors
+    T: bytes
+    B: bytes
     # B and T have the same length
 
     # for reference we keep I
-    I: AnyNodesColorTuple
+    I: List[int] | None
 
     # this is important as it indicates how to validate the column against assortment
     is_small_col: bool = False
@@ -119,10 +118,11 @@ class Bcol:
             else:
                 txt += f"[{color}]|[/{color}] "
         txt += "\n   "
-        for w_idx, c in enumerate(self.I):
-            color = int_to_color_str(c)
-            txt += f"[{color}]▅[/{color}]   "
-        txt += "\n"
+        if self.I is not None:
+            for w_idx, c in enumerate(self.I):
+                color = int_to_color_str(c)
+                txt += f"[{color}]▅[/{color}]   "
+            txt += "\n"
         for w_idx, c in enumerate(self.B):
             color = int_to_color_str(c)
             if w_idx == 0:
@@ -143,10 +143,11 @@ class Bcol:
             else:
                 txt += f"[{color}]/[/{color}] "
         txt += "\n"
-        for w_idx, c in enumerate(self.I):
-            color = int_to_color_str(c)
-            txt += f" [{color}]▅[/{color}]  "
-        txt += "\n"
+        if self.I is not None:
+            for w_idx, c in enumerate(self.I):
+                color = int_to_color_str(c)
+                txt += f" [{color}]▅[/{color}]  "
+            txt += "\n"
         for w_idx, c in enumerate(self.B):
             color = int_to_color_str(c)
             if w_idx % 2 == 0:
@@ -157,7 +158,7 @@ class Bcol:
 
 
 def make_bcol_iterator(
-    unchecked_bounds: Set[ColorTupleBase],
+    unchecked_bounds: Set[bytes],
     colors_required: List[int],
     top_min_validators: Dict[Tuple[int, int], np.ndarray],
     top_max_validators: Dict[Tuple[int, int], np.ndarray],
@@ -205,7 +206,7 @@ def make_bcol_iterator(
         color_count,
         allowed_tops,
     ):
-        yield Bcol(bytes(t), bytes(b), i, is_small_col)
+        yield Bcol(bytes(t), bytes(b), None, is_small_col)
 
 
 def color_int_from_char(c: str) -> int:
@@ -235,15 +236,305 @@ def wire_generator(fima, as_list=False, rng=None):
         yield arr.tolist() if as_list else arr
 
 
+# then the algorithm works with a backtracking approach accross columns
+# we start from the first column, and build all possible local solutions
+# based on the min/max constraints of this columns.
+# each solution comes with a Bottom wiring (Bcol.B) that is kept as input for the next columns (Bound set)
+# we can jump to the next column , that will work on the Bound set do :
+#   - filter Bounds that do not match its Validators (this filter as well the previous column solution that were inserted)
+#   - build all possible local solutions (Bcol) that satisfy its own constraints and Bcol.T is in the Bound set.
+#   - iterate if any solution found; else backtrack to the previous column to get a new solution
+
+# the initial columns can expire in solution and is marked as fullyExhausted
+# when a column is fullyExhausted, we move to the next column directly
+# when any column exhaust and the previous columns is fullyExhausted, it is marked as fullyExhausted too
+# this continue until the last column is fullyExhausted or a solution is found
+
+# a solution is found when the last column is able to build at least one solution
+# at this point we have a valid Bcol for each column that can be printed
+
+
+# we have then variables to hold the current state of the search
+class SolutionState:
+    wire_count: int
+
+    columns_solutions: List[List[Bcol]]
+    columns_fullyExhausted: List[bool]
+
+    # state of the current iterators for each column
+    columns_iterators: List[Iterator[Bcol] | None]
+    iterators_head: List[Set[bytes] | None]
+
+    # bound_check between columns, if false, it means this bound has not been evaluated yet by the next columns
+    # if true, it means this bound has been evaluated already
+    bound_check: List[Dict[bytes, bool]]
+
+    # columns constraints (min/max) for each column
+    columns_constraints: List[
+        Tuple[Dict[Tuple[int, int], np.ndarray], Dict[Tuple[int, int], np.ndarray]]
+    ]
+
+    # bracelet configuration by column, as list of list of int
+    b_configs: List[List[int]]
+
+    def __init__(
+        self,
+        wire_count: int,
+        columns_constraints,
+        b_configs: List[List[int]],
+        fima,
+        init_wireing: bytes = None,
+        initial_sampling_batch_size=100000,
+        iteration_batch_size=1000000,
+    ):
+        self.wire_count = wire_count
+        self.num_colors = len(fima)
+        self.columns_constraints = columns_constraints
+        self.b_configs = b_configs
+
+        self.columns_solutions = [[] for _ in self.b_configs]
+        self.columns_fullyExhausted = [False for _ in self.b_configs]
+        self.columns_iterators = [None for _ in self.b_configs]
+        self.iterators_head = [None for _ in self.b_configs]
+        self.bound_check = [{} for _ in self.b_configs]
+
+        self.init_wireing = init_wireing
+        self.wire_gen = wire_generator(fima, as_list=True)
+        self.INITIAL_SAMPLING_BATCH_SIZE = initial_sampling_batch_size
+        self.ITERATION_BATCH_SIZE = iteration_batch_size
+        self.console = Console()
+
+    def color_count(self) -> int:
+        return self.num_colors
+
+    def search_column(self, idx: int) -> int:
+        # search column at idx
+        # depending on the state of the column:
+
+        # if we have unchecked bounds from previous layer
+        # we create a new iterator with the allowed tops from previous layer bounds that are not yet checked
+
+        # if we don't have unchecked bounds from previous layer
+        # we check if the previous layer is fully exhausted
+        # - if yes, we mark this layer as fully exhausted and move to next layer
+        # - if no, we move to previous layer
+
+        # if we have an existing iterator
+        #   we continue pulling from it some solutions
+        #   we pull N solutions from the iterator
+        #   if we have some solutions
+        #     - we update the bound_check with previous layer bound to mark as evaluated
+        #     - we update the bound_check for this layer with the Bcol.B of the solutions
+        #     - we store the solutions in columns_solutions and move to the next columns (ok finish because we are the last)
+        #   if we don't have solutions after pulling N solutions
+        #     - if we exhausted the iterator
+        #        - we mark all the the evaluated bounds as evaluated in the previous layer and invalid (filtering the parent solutions)
+        #     - we check if the previous layer is fully exhausted
+        #        - if yes, we can relunch this column
+        #        - if no, we move to previous layer
+        if self.columns_iterators[idx] is None or self.columns_iterators[idx] is True:
+            if idx == 0:
+                # self.iterators_head[idx] = build...
+                if self.columns_fullyExhausted[idx]:
+                    self.console.print(
+                        f" Column {idx} exhausted, no more solutions here. moving next"
+                    )
+
+                    return idx + 1  # move to next layer
+
+                unchecked_bounds = (
+                    {self.init_wireing} if self.init_wireing is not None else None
+                )
+                if unchecked_bounds is None:
+                    unchecked_bounds = {
+                        bytes(next(self.wire_gen))
+                        for _ in range(self.INITIAL_SAMPLING_BATCH_SIZE)
+                    }
+                self.console.print(
+                    f" Column {idx} Create iterator for {len(unchecked_bounds) if unchecked_bounds is not None else 0} bounds"
+                )
+                self.iterators_head[idx] = unchecked_bounds
+                self.columns_iterators[idx] = make_bcol_iterator(
+                    unchecked_bounds=unchecked_bounds,
+                    colors_required=self.b_configs[idx],
+                    top_min_validators=self.columns_constraints[idx][0],
+                    top_max_validators=self.columns_constraints[idx][1],
+                    bottom_min_validators=self.columns_constraints[idx + 1][0],
+                    bottom_max_validators=self.columns_constraints[idx + 1][1],
+                    wire_count=self.wire_count,
+                    color_count=self.color_count(),
+                )
+            else:
+                prev_bounds = self.bound_check[idx - 1]
+                unchecked_bounds = set((k for k, v in prev_bounds.items() if not v))
+                if len(unchecked_bounds) == 0:
+                    # mm, nothing to work on yet. maybe I can jumpt to another layer
+                    if self.columns_fullyExhausted[idx - 1]:
+                        self.columns_fullyExhausted[idx] = True
+                        return idx + 1
+                    else:
+                        return idx - 1
+                else:
+                    # create an iterator with these bounds
+                    self.iterators_head[idx] = unchecked_bounds
+
+                    if (
+                        idx < len(self.b_configs) - 1
+                    ):  # identify if we have a next layer
+                        bottom_min_validators = self.columns_constraints[idx + 1][0]
+                        bottom_max_validators = self.columns_constraints[idx + 1][1]
+                    else:
+                        bottom_min_validators = None
+                        bottom_max_validators = None
+
+                    self.columns_iterators[idx] = make_bcol_iterator(
+                        unchecked_bounds=unchecked_bounds,
+                        colors_required=self.b_configs[idx],
+                        top_min_validators=self.columns_constraints[idx][0],
+                        top_max_validators=self.columns_constraints[idx][1],
+                        bottom_min_validators=bottom_min_validators,
+                        bottom_max_validators=bottom_max_validators,
+                        wire_count=self.wire_count,
+                        color_count=self.color_count(),
+                    )
+
+        # pull next N elements from the iterator
+        current_head = self.iterators_head[idx]
+        self.console.print(
+            f" with head size:",
+            len(current_head) if current_head is not None else "NoSize",
+            " elements",
+        )
+        all_possible, exhausted, column_iterator = take_with_exhaustion(
+            self.columns_iterators[idx], n=self.ITERATION_BATCH_SIZE
+        )
+
+        if exhausted:
+            self.columns_iterators[idx] = True  # mark as exhausted
+            if idx == 0:
+                self.console.print(
+                    f" Column {idx} exhausted, no more solutions here. Reampling from scratch my friend "
+                )
+
+                # self.columns_fullyExhausted[idx] = True
+        else:
+            self.columns_iterators[idx] = (
+                column_iterator  # keep the iterator in a corner for the moment
+            )
+
+        next_layer_bounds = self.bound_check[idx]
+        added_solution_downward = 0
+        for sol in all_possible:
+
+            # add the new bound for this layer
+            if sol.B not in next_layer_bounds:
+                next_layer_bounds[sol.B] = False  # not yet evaluated
+                added_solution_downward += 1
+
+        # keep all the new solutions on my side.
+        self.columns_solutions[idx] = self.columns_solutions[idx] + all_possible
+        self.console.print(
+            f" Pulled {len(all_possible)} solutions, exhausted={exhausted}, total solutions now={len(self.columns_solutions[idx])}"
+        )
+        if added_solution_downward:
+            return idx + 1  # move to next layer
+        else:
+            if exhausted:
+                if idx == 0:
+                    self.console.print(
+                        f" Column {idx} exhausted, no more solutions here. Will resample more"
+                    )
+                    # self.columns_fullyExhausted[idx] = True
+                    return idx
+                else:
+                    # mark all the evaluated bounds as evaluated in the previous layer
+                    prev_bounds = self.bound_check[idx - 1]
+                    for k in current_head:
+                        prev_bounds[k] = True  # mark as evaluated
+
+                    # and filtering the parent solutions based on my current solutions Tops
+                    current_tops = set(s.T for s in self.columns_solutions[idx])
+                    self.columns_solutions[idx - 1] = [
+                        s
+                        for s in self.columns_solutions[idx - 1]
+                        if s.B in current_tops
+                    ]
+                    # i can relaunch myself
+                    self.console.print(
+                        f" Column {idx} self relaunch after exhaustion, filtered previous column to {len(self.columns_solutions[idx - 1])} solutions"
+                    )
+                    return idx
+
+            else:
+                return idx  # we can relaunch this column
+
+    def retrieve_solution_up_to_column(
+        self, col_idx: int, target_top: bytes | None
+    ) -> List[Bcol]:
+        if col_idx == 0:
+            for bcol in self.columns_solutions[col_idx]:
+                if bcol.B == target_top:
+                    bcol.I = self.b_configs[col_idx]
+                    return [bcol]
+            self.console.print("No solution found at col 0")
+            return None
+        else:
+            for bcol in self.columns_solutions[col_idx]:
+                if target_top is not None and bcol.B != target_top:
+                    continue
+                prev_solution = self.retrieve_solution_up_to_column(col_idx - 1, bcol.T)
+                if prev_solution is not None:
+                    bcol.I = self.b_configs[col_idx]
+                    return prev_solution + [bcol]
+            # self.console.print("No solution found at col", col_idx)
+            return None
+
+    def to_rich_table(self, current_col_idx) -> Text:
+        from rich.table import Table
+        from rich.text import Text
+        from rich.style import Style
+        from rich.color import Color
+
+        table = Table()
+        table.add_column("B_config", justify="left", no_wrap=True)
+        table.add_column(" ", no_wrap=True)
+        table.add_column("#Sols", no_wrap=True)
+        table.add_column("#Bounds", no_wrap=True)
+
+        for col_idx in range(len(self.b_configs)):
+            if col_idx % 2 == 1:
+                prefix = " "
+            else:
+                prefix = ""
+            table.add_row(
+                Text.assemble(
+                    *(
+                        [prefix]
+                        + [
+                            Text(
+                                "▐▌",
+                                style=Style(color=Color.parse(int_to_color_str(c))),
+                            )
+                            for c in self.b_configs[col_idx]
+                        ]
+                    )
+                ),
+                "<" if col_idx == current_col_idx else " ",
+                Text(
+                    f"{len(self.columns_solutions[col_idx])}",
+                ),
+                Text(
+                    f"{len(self.bound_check[col_idx])}",
+                ),
+            )
+        return table
+
+
 def solve_bracelet(
     bconfig_ints: List[List[int]], wire_count: int, num_colors: int, fima: np.ndarray
 ):
-    CFG_INITIAL_SAMPLING_BATCH_SIZE = 100000
-    CFG_TAKE_N = 1000000
-    ColorEnum, ColorTuple, ColorCounter = make_color_types(
-        tuple_len=wire_count,
-        num_colors=num_colors,
-    )
+    CFG_INITIAL_SAMPLING_BATCH_SIZE = 10000
+    CFG_TAKE_N = 100000
     init_wireing = None
 
     # 0. determine assortment from column configurations, this ensure the
@@ -260,7 +551,7 @@ def solve_bracelet(
     # that is  0--2, 0--4, 0--6, ... and also the partials 2-4 , 4-6, ...
 
     constraints_list = []
-    for col_idx in range(len(columns)):
+    for col_idx in range(len(bconfig_ints)):
         min_constraints, max_constraints, missing_colors = build_min_max_validator_2(
             bconfig_ints[col_idx:],
             fima,
@@ -271,263 +562,6 @@ def solve_bracelet(
 
         constraints_list.append((min_constraints, max_constraints))
 
-    # then the algorithm works with a backtracking approach accross columns
-    # we start from the first column, and build all possible local solutions
-    # based on the min/max constraints of this columns.
-    # each solution comes with a Bottom wiring (Bcol.B) that is kept as input for the next columns (Bound set)
-    # we can jump to the next column , that will work on the Bound set do :
-    #   - filter Bounds that do not match its Validators (this filter as well the previous column solution that were inserted)
-    #   - build all possible local solutions (Bcol) that satisfy its own constraints and Bcol.T is in the Bound set.
-    #   - iterate if any solution found; else backtrack to the previous column to get a new solution
-
-    # the initial columns can expire in solution and is marked as fullyExhausted
-    # when a column is fullyExhausted, we move to the next column directly
-    # when any column exhaust and the previous columns is fullyExhausted, it is marked as fullyExhausted too
-    # this continue until the last column is fullyExhausted or a solution is found
-
-    # a solution is found when the last column is able to build at least one solution
-    # at this point we have a valid Bcol for each column that can be printed
-
-    # we have then variables to hold the current state of the search
-    console = Console()
-
-    class SolutionState:
-        wire_count: int
-
-        columns_solutions: List[List[Bcol]]
-        columns_fullyExhausted: List[bool]
-
-        # state of the current iterators for each column
-        columns_iterators: List[Iterator[Bcol] | None]
-        iterators_head: List[Set[ColorTupleBase] | None]
-
-        # bound_check between columns, if false, it means this bound has not been evaluated yet by the next columns
-        # if true, it means this bound has been evaluated already
-        bound_check: List[Dict[ColorTupleBase, bool]]
-
-        # columns constraints (min/max) for each column
-        columns_constraints: List[
-            Tuple[Dict[Tuple[int, int], np.ndarray], Dict[Tuple[int, int], np.ndarray]]
-        ]
-
-        # bracelet configuration by column, as list of list of int
-        b_configs: List[List[int]]
-
-        def __init__(
-            self,
-            wire_count: int,
-            columns_constraints,
-            b_configs: List[List[int]],
-            fima,
-            init_wireing: bytes = None,
-            initial_sampling_batch_size=100000,
-            iteration_batch_size=1000000,
-        ):
-            self.wire_count = wire_count
-            self.columns_constraints = columns_constraints
-            self.b_configs = b_configs
-
-            self.columns_solutions = [[] for _ in columns]
-            self.columns_fullyExhausted = [False for _ in columns]
-            self.columns_iterators = [None for _ in columns]
-            self.iterators_head = [None for _ in columns]
-            self.bound_check = [{} for _ in columns]
-
-            self.init_wireing = init_wireing
-            self.wire_gen = wire_generator(fima, as_list=True)
-            self.INITIAL_SAMPLING_BATCH_SIZE = initial_sampling_batch_size
-            self.ITERATION_BATCH_SIZE = iteration_batch_size
-
-        @classmethod
-        def color_count(cls):
-            return ColorEnum.__len__()
-
-        def search_column(self, idx: int):
-            # search column at idx
-            # depending on the state of the column:
-
-            # if we have unchecked bounds from previous layer
-            # we create a new iterator with the allowed tops from previous layer bounds that are not yet checked
-
-            # if we don't have unchecked bounds from previous layer
-            # we check if the previous layer is fully exhausted
-            # - if yes, we mark this layer as fully exhausted and move to next layer
-            # - if no, we move to previous layer
-
-            # if we have an existing iterator
-            #   we continue pulling from it some solutions
-            #   we pull N solutions from the iterator
-            #   if we have some solutions
-            #     - we update the bound_check with previous layer bound to mark as evaluated
-            #     - we update the bound_check for this layer with the Bcol.B of the solutions
-            #     - we store the solutions in columns_solutions and move to the next columns (ok finish because we are the last)
-            #   if we don't have solutions after pulling N solutions
-            #     - if we exhausted the iterator
-            #        - we mark all the the evaluated bounds as evaluated in the previous layer and invalid (filtering the parent solutions)
-            #     - we check if the previous layer is fully exhausted
-            #        - if yes, we can relunch this column
-            #        - if no, we move to previous layer
-            if (
-                self.columns_iterators[idx] is None
-                or self.columns_iterators[idx] is True
-            ):
-                if idx == 0:
-                    # self.iterators_head[idx] = build...
-                    if self.columns_fullyExhausted[idx]:
-                        console.print(
-                            f" Column {idx} exhausted, no more solutions here. moving next"
-                        )
-
-                        return idx + 1  # move to next layer
-
-                    unchecked_bounds = (
-                        {self.init_wireing} if self.init_wireing is not None else None
-                    )
-                    if unchecked_bounds is None:
-                        unchecked_bounds = {
-                            bytes(next(self.wire_gen))
-                            for _ in range(self.INITIAL_SAMPLING_BATCH_SIZE)
-                        }
-                    console.print(
-                        f" Column {idx} Create iterator for {len(unchecked_bounds) if unchecked_bounds is not None else 0} bounds"
-                    )
-                    self.iterators_head[idx] = unchecked_bounds
-                    self.columns_iterators[idx] = make_bcol_iterator(
-                        unchecked_bounds=unchecked_bounds,
-                        colors_required=self.b_configs[idx],
-                        top_min_validators=self.columns_constraints[idx][0],
-                        top_max_validators=self.columns_constraints[idx][1],
-                        bottom_min_validators=self.columns_constraints[idx + 1][0],
-                        bottom_max_validators=self.columns_constraints[idx + 1][1],
-                        wire_count=self.wire_count,
-                        color_count=self.color_count(),
-                    )
-                else:
-                    prev_bounds = self.bound_check[idx - 1]
-                    unchecked_bounds = set((k for k, v in prev_bounds.items() if not v))
-                    if len(unchecked_bounds) == 0:
-                        # mm, nothing to work on yet. maybe I can jumpt to another layer
-                        if self.columns_fullyExhausted[idx - 1]:
-                            self.columns_fullyExhausted[idx] = True
-                            return idx + 1
-                        else:
-                            return idx - 1
-                    else:
-                        # create an iterator with these bounds
-                        self.iterators_head[idx] = unchecked_bounds
-
-                        if idx < len(columns) - 1:  # identify if we have a next layer
-                            bottom_min_validators = self.columns_constraints[idx + 1][0]
-                            bottom_max_validators = self.columns_constraints[idx + 1][1]
-                        else:
-                            bottom_min_validators = None
-                            bottom_max_validators = None
-
-                        self.columns_iterators[idx] = make_bcol_iterator(
-                            unchecked_bounds=unchecked_bounds,
-                            colors_required=self.b_configs[idx],
-                            top_min_validators=self.columns_constraints[idx][0],
-                            top_max_validators=self.columns_constraints[idx][1],
-                            bottom_min_validators=bottom_min_validators,
-                            bottom_max_validators=bottom_max_validators,
-                            wire_count=self.wire_count,
-                            color_count=self.color_count(),
-                        )
-
-            # pull next N elements from the iterator
-            current_head = self.iterators_head[idx]
-            console.print(
-                f" with head size:",
-                len(current_head) if current_head is not None else "NoSize",
-                " elements",
-            )
-            all_possible, exhausted, column_iterator = take_with_exhaustion(
-                self.columns_iterators[idx], n=self.ITERATION_BATCH_SIZE
-            )
-
-            if exhausted:
-                self.columns_iterators[idx] = True  # mark as exhausted
-                if idx == 0:
-                    console.print(
-                        f" Column {idx} exhausted, no more solutions here. Reampling from scratch my friend "
-                    )
-
-                    # self.columns_fullyExhausted[idx] = True
-            else:
-                self.columns_iterators[idx] = (
-                    column_iterator  # keep the iterator in a corner for the moment
-                )
-
-            next_layer_bounds = self.bound_check[idx]
-            added_solution_downward = 0
-            for sol in all_possible:
-
-                # add the new bound for this layer
-                if sol.B not in next_layer_bounds:
-                    next_layer_bounds[sol.B] = False  # not yet evaluated
-                    added_solution_downward += 1
-
-            # keep all the new solutions on my side.
-            self.columns_solutions[idx] = self.columns_solutions[idx] + all_possible
-            console.print(
-                f" Pulled {len(all_possible)} solutions, exhausted={exhausted}, total solutions now={len(self.columns_solutions[idx])}"
-            )
-            if added_solution_downward:
-                return idx + 1  # move to next layer
-            else:
-                if exhausted:
-                    if idx == 0:
-                        console.print(
-                            f" Column {idx} exhausted, no more solutions here. Will resample more"
-                        )
-                        # self.columns_fullyExhausted[idx] = True
-                        return idx
-                    else:
-                        # mark all the evaluated bounds as evaluated in the previous layer
-                        prev_bounds = self.bound_check[idx - 1]
-                        for k in current_head:
-                            prev_bounds[k] = True  # mark as evaluated
-
-                        # and filtering the parent solutions based on my current solutions Tops
-                        current_tops = set(s.T for s in self.columns_solutions[idx])
-                        self.columns_solutions[idx - 1] = [
-                            s
-                            for s in self.columns_solutions[idx - 1]
-                            if s.B in current_tops
-                        ]
-                        # i can relaunch myself
-                        console.print(
-                            f" Column {idx} self relaunch after exhaustion, filtered previous column to {len(self.columns_solutions[idx - 1])} solutions"
-                        )
-                        return idx
-
-                else:
-                    return idx  # we can relaunch this column
-
-        def find_solution_up_to_columns(
-            self, col_idx, target_top: Tuple[ColorTupleBase, ...] | None
-        ) -> List[Bcol]:
-            if col_idx == 0:
-                for bcol in self.columns_solutions[col_idx]:
-                    if bcol.B == target_top:
-                        return [bcol]
-                console.print("No solution found at col 0")
-                return None
-            else:
-                for bcol in self.columns_solutions[col_idx]:
-                    if target_top is not None and bcol.B != target_top:
-                        continue
-                    prev_solution = self.find_solution_up_to_columns(
-                        col_idx - 1, bcol.T
-                    )
-                    if prev_solution is not None:
-                        return prev_solution + [bcol]
-                # console.print("No solution found at col", col_idx)
-                return None
-
-    console.print("Fima:", counter_to_rich(fima, color_count=num_colors))
-
-    console.print("Building solution state...")
     solution_state = SolutionState(
         wire_count,
         constraints_list,
@@ -537,11 +571,15 @@ def solve_bracelet(
         initial_sampling_batch_size=CFG_INITIAL_SAMPLING_BATCH_SIZE,
         iteration_batch_size=CFG_TAKE_N,
     )
+    console = solution_state.console
+    console.print("Fima:", counter_to_rich(fima, color_count=num_colors))
 
+    console.print("Building solution state...")
     # we start at column 0
     current_col = 0
     solution_found = False
     while not solution_found:
+        console.print(solution_state.to_rich_table(current_col))
         console.print(f"Searching column {current_col}...")
         next_idx = solution_state.search_column(current_col)
 
@@ -552,7 +590,7 @@ def solve_bracelet(
 
     # 3. printing sexy results with rich lib...
 
-    sols = solution_state.find_solution_up_to_columns(len(bconfig_ints) - 1, None)
+    sols = solution_state.retrieve_solution_up_to_column(len(bconfig_ints) - 1, None)
     for s in sols:
         console.print(s.__to_rich__())
     return solution_state
@@ -640,8 +678,9 @@ if __name__ == "__main__":
         "CCABAACCBAAA",
     ]  # 12
     fima = np.array([8, 8, 8], dtype=np.int8)
-    columns = ["BABB", "ABA", "AABA", "AAA", "AAAA"]  # 4 nodes
-    fima = np.array([4, 4], dtype=np.int8)
+
+    # columns = ["BABB", "ABA", "AABA", "AAA", "AAAA"]  # 4 nodes
+    # fima = np.array([4, 4], dtype=np.int8)
 
     wire_count = max(len(col) for col in columns) * 2
     num_colors = len(set("".join(columns)))

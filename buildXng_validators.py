@@ -205,7 +205,10 @@ def build_min_max_validator(
                             segment_index[(0, k2_end_idx)] = add
 
     # convert all counters to numpy arrays for easier manipulation
-    segment_index = {k: counter_to_vec(c1, color_count=color_count) for k, c1 in segment_index.items()}
+    segment_index = {
+        k: counter_to_vec(c1, color_count=color_count)
+        for k, c1 in segment_index.items()
+    }
     # minimum assortmen viable
     if (0, wire_count) in segment_index:
         mina = segment_index[(0, wire_count)]
@@ -427,7 +430,11 @@ def build_col_iterator(
         else:
             min_val_b = None
         if bottom_max_validators is not None:
+            # #TODO : check this
             max_val_b = bottom_max_validators.get((0, end_wire_idx), None)
+            # because of the interleaved nature ,
+            # this might be always return None.
+            # TODO : verify this logic
         else:
             max_val_b = None
 
@@ -474,15 +481,14 @@ def build_col_iterator(
                     else:
                         bseq_b = Bseq + [LT, RT]
 
-                    iseq_b = Iseq + [colors_required[at_node_pox]]
                     if at_node_pox + 1 < len(colors_required):
                         # not leaf yet
                         yield from build_(
-                            at_node_pox + 1, tseq_b, bseq_b, iseq_b, current_count
+                            at_node_pox + 1, tseq_b, bseq_b, Iseq, current_count
                         )
                     else:
                         # leaf
-                        yield tseq_b, bseq_b, iseq_b, current_count
+                        yield tseq_b, bseq_b, Iseq, current_count
 
     if is_small_col:
         for color_start_thread in range(color_count):
@@ -547,8 +553,7 @@ def build_col_iterator(
                             continue
                     tseq_f = tseq_b + [color_end]
                     bseq_f = bseq_b + [color_end]
-                    iseq_f = iseq_b
-                    yield tseq_f, bseq_f, iseq_f
+                    yield tseq_f, bseq_f, iseq_b
     else:
         for t, b, i, _ in build_(0, [], [], [], np.zeros(color_count, dtype=int)):
             yield t, b, i

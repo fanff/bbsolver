@@ -66,12 +66,25 @@ def load_bracelet_from_image(
             color_index = color_to_index[color]
             bracelet_design[col_idx][x] = color_index
 
-    return bracelet_design, wire_count
+    # indexed color count
+    indexed_color_count = Counter()
+    for color, count in all_color_count.items():
+        color_index = color_to_index[color]
+        indexed_color_count[color_index] = count
+    return (
+        bracelet_design,
+        wire_count,
+        color_to_index,
+        index_to_color,
+        indexed_color_count,
+    )
 
 
 if __name__ == "__main__":
-    bracelet_design, wire_count = load_bracelet_from_image(
-        Path("bratest.png"),
-        target_bracelet_node_width=20,
-        crop_top_n_cols=32,
+    bracelet_design, wire_count, color_to_index, index_to_color, indexed_color_count = (
+        load_bracelet_from_image(
+            Path("bra_design\\10\\1030_test_purple.png"),
+            target_bracelet_node_width=None,
+            crop_top_n_cols=-1,
+        )
     )
