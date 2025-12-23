@@ -11,23 +11,23 @@ if __name__ == "__main__":
     from pathlib import Path
 
     console = Console()
-    # bracelet_design, wire_count, color_to_index, index_to_color, indexed_color_count = (
-    #    load_bracelet_from_image(
-    #        Path("bra_design\\10\\1030_test_purple.png"),
-    #        target_bracelet_node_width=None,
-    #        crop_top_n_cols=-1,
-    #    )
-    # )
-    # fima = np.array([11, 9], dtype=int)
-
     bracelet_design, wire_count, color_to_index, index_to_color, indexed_color_count = (
-        load_bracelet_from_image(
-            Path("bra_design/20/bratest.png"),
-            target_bracelet_node_width=None,
-            crop_top_n_cols=34,
-        )
+       load_bracelet_from_image(
+           Path("bra_design\\10\\1030_test_purple.png"),
+           target_bracelet_node_width=None,
+           crop_top_n_cols=-1,
+       )
     )
-    fima = np.array([20, 12, 8], dtype=int)
+    fima = np.array([11, 9], dtype=int)
+
+    #bracelet_design, wire_count, color_to_index, index_to_color, indexed_color_count = (
+    #    load_bracelet_from_image(
+    #        Path("bra_design/20/bratest.png"),
+    #        target_bracelet_node_width=None,
+    #        crop_top_n_cols=34,
+    #    )
+    #)
+    #fima = np.array([20, 12, 8], dtype=int)
 
     console.print("Wire count:", wire_count)
     console.print("Indexed color count:", indexed_color_count)

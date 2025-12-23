@@ -1,5 +1,5 @@
 [project]
-name = "quiskit-test"
+name = "bbsolver"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -8,7 +8,5 @@ dependencies = [
     "pillow>=12.0.0",
     "pytest>=9.0.1",
     "pytest-benchmark>=5.2.3",
-    "qiskit>=2.2.3",
-    "qiskit-aer>=0.17.2",
     "rich>=14.2.0",
 ]

@@ -16,6 +16,13 @@ def make_minimum_top_count_validators(
             col = col_configs[0]
             if len(col) * 2 == wire_count:  # normal column
                 sc = []
+
+                # ! !!!  here I am seeding the 0,1 segments,
+                # beccause the counting will result in segments of size 2 (0,2), (2,4) ...
+                # but we can distilate the constraints into atomic segments of size 1
+                for _ in range(wire_count):
+                    sc.append((Counter({k: 0 for k in range(color_count)}), _, _ + 1))
+
                 for cidx, c in enumerate(col):
                     sc.append((Counter({c: 1}), cidx * 2, cidx * 2 + 2))
                 return sc
@@ -785,7 +792,7 @@ if __name__ == "__main__":
     color_count = 3
     wire_count = max(len(b) for b in bconfig) * 2
     # current user assortment is always fixed (Final Maximal Assortment)
-    console.print("fima:", counter_to_rich(fima))
+    console.print("fima:", counter_to_rich(fima, color_count=color_count))
 
     column_to_work = 0
 
@@ -796,8 +803,8 @@ if __name__ == "__main__":
         bconfig_ints[column_to_work:], fima, color_count=color_count
     )
 
-    console.print("missing :", counter_to_rich(missing_colors))
-    console.print("Final upper bound calculation:")
+    console.print("missing :", counter_to_rich(missing_colors, color_count=color_count))
+    console.print("Final bound calculation:")
     current_s = -1
     buff = ""
     for (s, e), min_constraint in sorted(
@@ -808,8 +815,21 @@ if __name__ == "__main__":
             current_s = s
             buff = ""
         upper_bound = upper_bound_set[(s, e)]
-        buff += f"({s:02d}-{e:02d}) {counter_to_rich(min_constraint)}<{counter_to_rich(upper_bound)} "
+        buff += f"({s:02d}-{e:02d}) {counter_to_rich(min_constraint, color_count=color_count)}<{counter_to_rich(upper_bound, color_count=color_count)} "
     console.print(buff)
+
+    # takking all bounds (0,n )
+    for (seg_start, seg_end), lb in lower_bound_set.items():
+        if seg_start == 0:
+            console.print(
+                f"Total Lower Bound : {counter_to_rich(lb, color_count=color_count)}"
+            )
+
+    quit()
+    # what about the next column ?
+    lb_next, ub_next, _ = build_min_max_validator_2(
+        bconfig_ints[column_to_work + 1 :], fima, color_count=color_count
+    )
 
     # now iterate solutions
     raw_solutions_iter = build_col_iterator(
@@ -818,57 +838,6 @@ if __name__ == "__main__":
         upper_bound_set,
         None,
         None,
-        color_count=color_count,
-        wire_count=wire_count,
-    )
-
-    raw_solutions = list(raw_solutions_iter)
-    print(len(raw_solutions))
-    #### quit , rest is discarded for now
-    quit()
-    min_constraints, max_constraints, missing_colors = build_min_max_validator(
-        bconfig_ints[column_to_work:],
-        fima,
-        color_count=color_count,
-    )
-
-    if missing_colors.total() > 0 or True:
-        console.print(
-            f"[red]Warning: infeasible configuration, missing colors:[/red] {(missing_colors)}"
-        )
-
-        # now print all constraints
-        for k, min_contraint in min_constraints.items():
-            if k in max_constraints:
-                max_constraint = counter_to_rich(max_constraints[k])
-                if np.any(max_constraints[k] - min_contraint < 0):
-                    # we calculate the negative diff
-                    diff = max_constraints[k] - min_contraint
-                    # get the indices where negative
-                    negative_indices = np.where(diff < 0)[0]
-                    missing_colors = Counter(
-                        {
-                            int(color_idx): -int(diff[color_idx])
-                            for color_idx in negative_indices
-                        }
-                    )
-
-                    max_constraint += f"  [red](infeasible){missing_colors}[/red]"
-            else:
-                max_constraint = "N/A"
-            console.print(f"{k} > {counter_to_rich(min_contraint)}   !{max_constraint}")
-
-        for k, c2 in max_constraints.items():
-            if k in min_constraints:
-                pass
-            else:
-                console.print(f"{k}         !{counter_to_rich(c2)}")
-        quit()
-
-    raw_solutions_iter = build_col_iterator(
-        bconfig_ints[column_to_work],
-        min_constraints,
-        max_constraints,
         color_count=color_count,
         wire_count=wire_count,
     )
