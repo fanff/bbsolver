@@ -156,133 +156,6 @@ def counter_to_rich(c: Counter[int], color_count):
         raise ValueError("Unsupported counter type for rich conversion.")
 
 
-def build_min_max_validator(
-    bconfig: List[List[int]],
-    fima: np.ndarray,
-    color_count=3,
-) -> Tuple[
-    Dict[Tuple[int, int], np.ndarray],
-    Dict[Tuple[int, int], np.ndarray],
-    Counter,
-]:
-    wire_count = int(np.sum(fima))
-    is_small_col = len(bconfig[0]) * 2 + 2 == wire_count
-
-    upto = min(len(bconfig), wire_count * 2)
-    validators = [
-        make_minimum_top_count_validators(
-            bconfig[:i], wire_count, color_count=color_count
-        )
-        for i in range(1, upto + 1)
-    ]
-    # index the segments in a dictionnary
-    segment_index = {}
-
-    for vd in validators:
-        for counter, start_idx, end_idx in vd:
-            seg = (start_idx, end_idx)
-            if seg in segment_index:
-                segment_index[seg] = counter.__or__(segment_index[seg])
-            else:
-                segment_index[seg] = counter
-
-    if is_small_col:
-        segment_index[(0, 1)] = Counter({k: 0 for k in range(color_count)})
-        segment_index[(wire_count - 1, wire_count)] = Counter(
-            {k: 0 for k in range(color_count)}
-        )
-    # propagate constraints to larger segments (the triangle matrix tricks)
-    for _ in range(wire_count**2):
-        for k, min_contraint in list(segment_index.items()):
-            start_idx, end_idx = k
-            if start_idx == 0 and end_idx != wire_count:
-                for k2, c2 in list(segment_index.items()):
-                    if end_idx == k2[0]:
-
-                        k2_end_idx = k2[1]
-
-                        if (
-                            0,
-                            k2_end_idx,
-                        ) in segment_index:  # can be missing because no depth
-                            add = (min_contraint + c2) | segment_index[(0, k2_end_idx)]
-                            segment_index[(0, k2_end_idx)] = add
-                        else:
-                            add = min_contraint + c2
-                            segment_index[(0, k2_end_idx)] = add
-
-    # convert all counters to numpy arrays for easier manipulation
-    segment_index = {
-        k: counter_to_vec(c1, color_count=color_count)
-        for k, c1 in segment_index.items()
-    }
-    # minimum assortmen viable
-    if (0, wire_count) in segment_index:
-        mina = segment_index[(0, wire_count)]
-    else:
-        mina = fima
-
-    # compute max constraints by segments by applying fima - segment count
-    # and segment complement
-    # we do first all the edge segments
-    max_constraints = {}
-    for (start_idx, end_idx), min_contraint in segment_index.items():
-        if start_idx == 0:
-            max_count = fima - min_contraint
-            # find the max constraint interval by removing k from the (0, wire_count) segment (the global one)
-            max_interval = (end_idx, wire_count)
-            max_constraints[max_interval] = max_count
-        elif end_idx == wire_count and start_idx != 0:
-            max_count = fima - min_contraint
-            max_interval = (0, start_idx)
-            max_constraints[max_interval] = max_count
-    # finally process the full range segment (0, wire_count)
-    max_constraints[(0, wire_count)] = fima
-
-    # if we have a small col , we need to calculate the min for the (0,1 ) and (wire_count-1, wire_count)
-    # those two can be deduced from the full segment max - min of the complement
-    if is_small_col:
-        # 0--1 segment
-        left_min = segment_index.get((1, wire_count), np.zeros(color_count, dtype=int))
-        max_constraints[(0, 1)] = fima - left_min
-
-        # wire_count-1 -- wire_count segment (the final one)
-        right_min = segment_index.get(
-            (0, wire_count - 1), np.zeros(color_count, dtype=int)
-        )
-        max_constraints[(wire_count - 1, wire_count)] = fima - right_min
-
-    # now calculate some max constraint for the non-edge segments
-    for (start_idx, end_idx), min_contraint in segment_index.items():
-        if start_idx != 0 and end_idx != wire_count:
-            # like (4,6 )
-            # seek for the left border element (0, 6) max
-            left_max = max_constraints.get((0, end_idx), None)
-            # seek for the left border element (0,4 ) min
-            left_min = segment_index.get((0, start_idx), None)
-            if left_max is not None and left_min is not None:
-                max_constraints[(start_idx, end_idx)] = left_max - left_min
-            else:
-                pass
-    all_missing_colors = Counter({k: 0 for k in range(color_count)})
-
-    for k, min_contraint in segment_index.items():
-        if k in max_constraints:
-            if np.any(max_constraints[k] - min_contraint < 0):
-                # we calculate the negative diff
-                diff = max_constraints[k] - min_contraint
-                # get the indices where negative
-                negative_indices = np.where(diff < 0)[0]
-                missing_colors = Counter(
-                    {
-                        int(color_idx): -int(diff[color_idx])
-                        for color_idx in negative_indices
-                    }
-                )
-                all_missing_colors = all_missing_colors.__or__(missing_colors)
-    return segment_index, max_constraints, all_missing_colors
-
-
 def build_min_max_validator_2(
     bconfig: List[List[int]],
     fima: np.ndarray,
@@ -293,7 +166,6 @@ def build_min_max_validator_2(
     Counter,
 ]:
     wire_count = int(np.sum(fima))
-    is_small_col = len(bconfig[0]) * 2 + 2 == wire_count
 
     upto = min(len(bconfig), wire_count * 2)
     validators = [
@@ -310,19 +182,6 @@ def build_min_max_validator_2(
         max_c_v = np.min([fima, max_c_v], axis=0)
         return max_c_v
 
-    def print_count_with_max(mcounts):
-        for mc, s, e in mcounts:
-            mc_v = counter_to_vec(mc, color_count=color_count)
-            n = e - s
-            max_c_v = np.zeros(color_count, dtype=int)
-
-            mc_vsum = mc_v.sum()
-            for color_idx in range(color_count):
-                max_c_v[color_idx] = n - (mc_vsum - mc_v[color_idx])
-            max_c_v = np.min([fima, max_c_v], axis=0)
-            console.print(
-                f"Segment {s}-{e} : {counter_to_rich(mc)}<  <{counter_to_rich(max_c_v)}"
-            )
 
     constraints_set: Dict[Tuple[int, int], np.ndarray] = {}
     # we will add constraints in a specific order to propagate better
@@ -331,21 +190,6 @@ def build_min_max_validator_2(
             seg = (s, e)
             mc_v = counter_to_vec(min_constraint, color_count=color_count)
             insert_min_counter(constraints_set, seg, mc_v, color_count)
-
-    # now we order the constraints set by segment_start , then segment_end
-    # console.print("final lower bound calculation:")
-    # current_s = -1
-    # buff = ""
-    # for (s, e), min_constraint in sorted(
-    #     constraints_set.items(), key=lambda x: (x[0][0], x[0][1])
-    # ):
-    #     if current_s != s:
-    #         console.print(buff)
-    #         current_s = s
-    #         buff = ""
-    #     n = e - s
-    #     buff += f"({s:02d}-{e:02d}) {counter_to_rich(min_constraint)}< "
-    # console.print(buff)
 
     # we build the upper bound set :
     upped_bound_set: Dict[Tuple[int, int], np.ndarray] = {}
@@ -367,34 +211,12 @@ def build_min_max_validator_2(
             color_count,
             force_propagate=True,
         )
-    # console.print("Final upper bound calculation:")
-    # current_s = -1
-    # buff = ""
-    # for (s, e), min_constraint in sorted(
-    #     constraints_set.items(), key=lambda x: (x[0][0], x[0][1])
-    # ):
-    #     if current_s != s:
-    #         console.print(buff)
-    #         current_s = s
-    #         buff = ""
-    #     upper_bound = upped_bound_set[(s, e)]
-    #     buff += f"({s:02d}-{e:02d}) {counter_to_rich(min_constraint)}<{counter_to_rich(upper_bound)} "
-    # console.print(buff)
-
     all_missing_colors = Counter({k: 0 for k in range(color_count)})
-
-    # minimum assortment viable
-    # check if any upper bound has negative components
 
     for (s, e), upper_bound in upped_bound_set.items():
         min_constraint = constraints_set[(s, e)]
         if np.any(upper_bound - min_constraint < 0):
-            # console.print(
-            #     f"[red]Inconsistent constraints for segment {s}-{e} : {counter_to_rich(min_constraint)}<{counter_to_rich(upper_bound)}[/red]"
-            # )
-            # we calculate the negative diff
             diff = upper_bound - min_constraint
-            # get the indices where negative
             negative_indices = np.where(diff < 0)[0]
             missing_colors = Counter(
                 {
@@ -824,23 +646,3 @@ if __name__ == "__main__":
             console.print(
                 f"Total Lower Bound : {counter_to_rich(lb, color_count=color_count)}"
             )
-
-    quit()
-    # what about the next column ?
-    lb_next, ub_next, _ = build_min_max_validator_2(
-        bconfig_ints[column_to_work + 1 :], fima, color_count=color_count
-    )
-
-    # now iterate solutions
-    raw_solutions_iter = build_col_iterator(
-        bconfig_ints[column_to_work],
-        lower_bound_set,
-        upper_bound_set,
-        None,
-        None,
-        color_count=color_count,
-        wire_count=wire_count,
-    )
-
-    raw_solutions = list(raw_solutions_iter)
-    print(len(raw_solutions))

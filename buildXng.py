@@ -1,9 +1,6 @@
-from collections import Counter
 from dataclasses import dataclass
 import itertools
-from typing import Dict, Generator, Iterator, List, Set, Tuple, TypeVar
-from itertools import product
-from enum import Enum, auto
+from typing import Dict, Iterator, List, Set, Tuple, TypeVar
 import numpy as np
 from rich.text import Text
 from rich.console import Console
@@ -12,7 +9,6 @@ from buildXng_validators import (
     build_col_iterator,
     build_min_max_validator_2,
     counter_to_rich,
-    counter_to_vec,
 )
 from color import int_to_color_str
 
@@ -35,55 +31,6 @@ def take_with_exhaustion(it: Iterator[T], n=1000) -> tuple[List[T], bool, Iterat
         it = itertools.chain([peek], it)
 
     return items, exhausted, it
-
-
-AnyColorType = TypeVar("AnyColorType")
-AnyColumnColors = TypeVar("AnyColumnColors")
-AnyNodesColorTuple = TypeVar("AnyNodesColorTuple")
-ColorCounterType = TypeVar("ColorCounterType")
-
-
-# TODO DROP
-@dataclass
-class NodeColor:
-    TL: AnyColorType
-    TR: AnyColorType
-    BL: AnyColorType
-    BR: AnyColorType
-    I: AnyColorType
-
-    def __hash__(self):
-        return hash((self.TL, self.TR, self.BL, self.BR, self.I))
-
-
-# TODO DROP
-def quad_node_types(
-    input: AnyColorType, allowed_tops: Set[Tuple[AnyColorType, AnyColorType]] = None
-) -> Set[NodeColor]:
-    """Build all possible NodeColor configurations for a given input color."""
-    enum_cls = type(input)
-    values = list(enum_cls)
-    results = set()
-    if allowed_tops is not None:
-        for TL, TR in allowed_tops:
-            if input not in (TL, TR):
-                continue
-            results.add(NodeColor(TL=TL, TR=TR, BL=TL, BR=TR, I=input))
-            if TL != TR:
-                results.add(NodeColor(TL=TL, TR=TR, BL=TR, BR=TL, I=input))
-    else:
-        for TL in values:
-            for TR in values:
-                # Top must contain I
-                if input not in (TL, TR):
-                    continue
-
-                # Two possible bottom patterns: same or swapped
-                results.add(NodeColor(TL=TL, TR=TR, BL=TL, BR=TR, I=input))
-                if TL != TR:
-                    results.add(NodeColor(TL=TL, TR=TR, BL=TR, BR=TL, I=input))
-
-    return results
 
 
 @dataclass
@@ -207,15 +154,6 @@ def make_bcol_iterator(
         allowed_tops,
     ):
         yield Bcol(bytes(t), bytes(b), None, is_small_col)
-
-
-def color_int_from_char(c: str) -> int:
-    # A -> 0, B -> 1, C -> 2, ...
-    return ord(c) - ord("A")
-
-
-def colors_int_from_str(s: str) -> Generator[int, None, None]:
-    return (color_int_from_char(c) for c in s)
 
 
 def wire_generator(fima, as_list=False, rng=None):
@@ -535,16 +473,6 @@ def solve_bracelet(
 ):
     CFG_INITIAL_SAMPLING_BATCH_SIZE = 10000
     CFG_TAKE_N = 100000
-    init_wireing = None
-
-    # 0. determine assortment from column configurations, this ensure the
-    # assortment is compatible with all columns and there is the minimum number of wires
-    if init_wireing == True:
-        init_wireing = []
-        for l, r in zip(bconfig_ints[0], bconfig_ints[1] + [1]):
-            init_wireing += [l, r]
-        fima = counter_to_vec(Counter(init_wireing), color_count=num_colors)
-        init_wireing = bytes(init_wireing)
 
     # 1. We calculate validators for each columns;
     # Validators are a list of minimal & maximal color counters for each sub-segment of the columns starting from left
@@ -567,7 +495,7 @@ def solve_bracelet(
         constraints_list,
         bconfig_ints,
         fima,
-        init_wireing=init_wireing,
+        init_wireing=None,
         initial_sampling_batch_size=CFG_INITIAL_SAMPLING_BATCH_SIZE,
         iteration_batch_size=CFG_TAKE_N,
     )
